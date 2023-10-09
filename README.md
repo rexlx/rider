@@ -3,6 +3,7 @@
 
  ```
 go build .
+
 ./rider [args]
 
 Usage of ./rider:
