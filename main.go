@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"net"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/quic-go/quic-go"
 )
@@ -21,20 +23,29 @@ var (
 	experimental = flag.Bool("x", false, "Experimental (quic)")
 )
 
-type UDPLogger struct {
+type quicRequest struct {
 	Addr string
-	Log  *log.Logger
+	Data []byte
+}
+
+type UDPLogger struct {
+	Mutex        *sync.RWMutex
+	Addr         string
+	MessageCache []string
+	Log          *log.Logger
 }
 
 func main() {
 	flag.Parse()
 	logfile, err := os.OpenFile(*logfile, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	mu := &sync.RWMutex{}
+	mcache := make([]string, 100)
 	if err != nil {
 		panic(err)
 	}
 	defer logfile.Close()
 	log := log.New(logfile, "", log.LstdFlags)
-	udpLogger := &UDPLogger{Addr: *addr, Log: log}
+	udpLogger := &UDPLogger{Addr: *addr, Log: log, Mutex: mu, MessageCache: mcache}
 	if *experimental {
 		udpLogger.receiveDataOverQUIC()
 	} else {
@@ -58,7 +69,8 @@ func (u *UDPLogger) receiveDataOverUDP() {
 		if err != nil {
 			panic(err)
 		}
-		// get rid of trailing \n
+
+		u.AddToCache(buf[:n])
 
 		go u.writeToLog(buf[:n])
 	}
@@ -68,9 +80,18 @@ func (u *UDPLogger) writeToLog(data []byte) {
 	u.Log.Println(strings.TrimRight(string(data), "\n"))
 }
 
+func (u *UDPLogger) AddToCache(data []byte) {
+	if len(u.MessageCache) > 99 {
+		u.MessageCache = u.MessageCache[1:]
+	}
+	u.MessageCache = append(u.MessageCache, string(data))
+}
+
 func (u *UDPLogger) readFromQUIC(sess quic.Connection) {
 	fmt.Println("Accepting stream...")
-	stream, err := sess.AcceptStream(context.Background())
+	// create a context with not timout
+	ctx := context.Background()
+	stream, err := sess.AcceptStream(ctx)
 	if err != nil {
 		panic(err)
 	}
@@ -78,12 +99,46 @@ func (u *UDPLogger) readFromQUIC(sess quic.Connection) {
 	fmt.Println("Accepted stream")
 	buf := make([]byte, *size)
 	for {
+		var qr quicRequest
 		n, err := stream.Read(buf)
 		if err != nil {
-			panic(err)
+			if err.Error() == "EOF" {
+				fmt.Println("readFromQUIC: Client closed connection")
+				break
+			}
+			fmt.Println("readFromQUIC: Error reading from stream", err)
+			break
 		}
+		err = json.Unmarshal(buf[:n], &qr)
+		if err != nil {
+			fmt.Println("readFromQUIC: Error unmarshalling", err)
+			// continue
+		}
+		if qr.Addr != "" {
+			fmt.Println("Received cache request from address", qr.Addr)
+			u.writeCacheToQUIC(stream)
+			continue
+		}
+		u.AddToCache(buf[:n])
 		go u.writeToLog(buf[:n])
 	}
+}
+
+func (u *UDPLogger) writeToQUIC(stream quic.Stream, data []byte) {
+	_, err := stream.Write(data)
+	if err != nil {
+		panic(err)
+	}
+}
+
+func (u *UDPLogger) writeCacheToQUIC(stream quic.Stream) {
+	u.Mutex.RLock()
+	defer u.Mutex.RUnlock()
+	for _, msg := range u.MessageCache {
+		u.writeToQUIC(stream, []byte(msg))
+	}
+	// let the client know we're done
+	u.writeToQUIC(stream, []byte("|eof|"))
 }
 
 func (u *UDPLogger) receiveDataOverQUIC() {
