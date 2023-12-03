@@ -111,6 +111,9 @@ func (u *UDPLogger) readFromQUIC(sess quic.Connection) {
 		}
 		err = json.Unmarshal(buf[:n], &qr)
 		if err != nil {
+			if strings.Contains(string(buf[:n]), "|beat|") {
+				continue
+			}
 			fmt.Println("readFromQUIC: Error unmarshalling", err)
 			// continue
 		}
