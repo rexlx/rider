@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -14,6 +15,7 @@ import (
 	"sync"
 
 	"github.com/quic-go/quic-go"
+	"github.com/rexlx/logary"
 )
 
 var (
@@ -32,20 +34,31 @@ type UDPLogger struct {
 	Mutex        *sync.RWMutex
 	Addr         string
 	MessageCache []string
-	Log          *log.Logger
+	Log          *logary.Logger
 }
 
 func main() {
 	flag.Parse()
-	logfile, err := os.OpenFile(*logfile, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	// logfile, err := os.OpenFile(*logfile, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	jsonLogger, err := logary.NewLogger(logary.Config{
+		Filename:   "structured.json",
+		Structured: true,
+		Level:      logary.DebugLevel,
+		MaxSizeMB:  10,
+		MaxBackups: 3,
+	})
+	if err != nil {
+		panic(err)
+	}
 	mu := &sync.RWMutex{}
 	mcache := make([]string, 100)
 	if err != nil {
 		panic(err)
 	}
-	defer logfile.Close()
-	log := log.New(logfile, "", log.LstdFlags)
-	udpLogger := &UDPLogger{Addr: *addr, Log: log, Mutex: mu, MessageCache: mcache}
+	// defer logfile.Close()
+	// thisLog := log.New(logfile, "", log.LstdFlags)
+	// thisLog.SetFlags(0)
+	udpLogger := &UDPLogger{Addr: *addr, Log: jsonLogger, Mutex: mu, MessageCache: mcache}
 	if *experimental {
 		udpLogger.receiveDataOverQUIC()
 	} else {
@@ -77,7 +90,8 @@ func (u *UDPLogger) receiveDataOverUDP() {
 }
 
 func (u *UDPLogger) writeToLog(data []byte) {
-	u.Log.Println(strings.TrimRight(string(data), "\n"))
+	u.Log.Debugf("%s", bytes.TrimRight(data, "\n"))
+	// u.Log.Println(strings.TrimRight(string(data), "\n"))
 }
 
 func (u *UDPLogger) AddToCache(data []byte) {

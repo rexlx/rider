@@ -15,6 +15,10 @@ github.com/quic-go/qtls-go1-20 v0.3.4 h1:MfFAPULvst4yoMgY9QmtpYmfij/em7O8UUi+bNV
 github.com/quic-go/qtls-go1-20 v0.3.4/go.mod h1:X9Nh97ZL80Z+bX/gUXMbipO6OxdiDi58b/fMC9mAL+k=
 github.com/quic-go/quic-go v0.39.0 h1:AgP40iThFMY0bj8jGxROhw3S0FMGa8ryqsmi9tBH3So=
 github.com/quic-go/quic-go v0.39.0/go.mod h1:T09QsDQWjLiQ74ZmacDfqZmhY/NLnw5BC40MANNNZ1Q=
+github.com/rexlx/logary v0.0.0-20251104211227-8165fa3bce4b h1:/gD3T62b1fOQZ8J3pz+KPzD7oOizKn1956TNypo4AUQ=
+github.com/rexlx/logary v0.0.0-20251104211227-8165fa3bce4b/go.mod h1:BOVAd46u2K6rl4BzKWTAFgYTaL0AGHS3pzUy8J1zH+8=
+github.com/rexlx/logary v0.0.0-20251104211725-cb6e90014947 h1:5JetLwOlZuhXHRG6w7o9hBQ1QxWVgPEo7mP13ddaw6s=
+github.com/rexlx/logary v0.0.0-20251104211725-cb6e90014947/go.mod h1:BOVAd46u2K6rl4BzKWTAFgYTaL0AGHS3pzUy8J1zH+8=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
 github.com/stretchr/testify v1.6.1/go.mod h1:6Fq8oRcR53rry900zMqJjRRixrwX3KX962/h/Wwjteg=
 go.uber.org/mock v0.3.0 h1:3mUxI1No2/60yUYax92Pt8eNOEecx2D3lcXZh2NEZJo=
