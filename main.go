@@ -52,12 +52,7 @@ func main() {
 	}
 	mu := &sync.RWMutex{}
 	mcache := make([]string, 100)
-	if err != nil {
-		panic(err)
-	}
-	// defer logfile.Close()
-	// thisLog := log.New(logfile, "", log.LstdFlags)
-	// thisLog.SetFlags(0)
+
 	udpLogger := &UDPLogger{Addr: *addr, Log: jsonLogger, Mutex: mu, MessageCache: mcache}
 	if *experimental {
 		udpLogger.receiveDataOverQUIC()
