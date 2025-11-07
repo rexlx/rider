@@ -78,9 +78,9 @@ func (u *UDPLogger) receiveDataOverUDP() {
 			panic(err)
 		}
 
-		u.AddToCache(buf[:n])
+		// u.AddToCache(buf[:n])
 
-		go u.writeToLog(buf[:n])
+		u.writeToLog(buf[:n])
 	}
 }
 
