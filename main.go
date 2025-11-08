@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -135,6 +136,37 @@ func (u *UDPLogger) handleQUICSession(sess quic.Connection) {
 }
 
 func (u *UDPLogger) readFromStream(stream quic.Stream) {
+	defer stream.Close()
+
+	// Use a scanner to read line-by-line automatically
+	scanner := bufio.NewScanner(stream)
+
+	// Optional: Increase max line size if you expect huge logs
+	// buf := make([]byte, 0, 64*1024)
+	// scanner.Buffer(buf, 1024*1024) // Max 1MB line
+
+	for scanner.Scan() {
+		data := scanner.Bytes()
+
+		// Check for heartbeat (now it might also have a newline, so use Contains or Trim)
+		if bytes.Equal(bytes.TrimSpace(data), []byte("|beat|")) {
+			// fmt.Println("Heartbeat")
+			continue
+		}
+
+		u.writeToLog(data)
+	}
+
+	if err := scanner.Err(); err != nil {
+		// Don't panic on connection resets, just log it
+		if err.Error() != "NO_ERROR" && err.Error() != "EOF" {
+			log.Printf("Stream scan error: %v", err)
+		}
+	}
+	fmt.Println("Stream closed")
+}
+
+func (u *UDPLogger) readFromStreamLegacy(stream quic.Stream) {
 	defer stream.Close()
 	buf := make([]byte, *size)
 	for {
