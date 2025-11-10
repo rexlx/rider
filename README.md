@@ -23,5 +23,7 @@ Usage of ./rider:
 
 
 # run with temporary buffer increases
-sudo sysctl -w net.core.rmem_max=7500000 ;sudo sysctl -w net.core.wmem_max=7500000;go build .;./rider -addr ":5140" -x -tlscert ~/bin/data/server.crt -tlskey ~/bin/data/server.key
+sudo sysctl -w net.core.rmem_max=7500000;sudo sysctl -w net.core.wmem_max=7500000
+go build .
+./rider -addr ":5140" -x -tlscert ~/bin/data/server.crt -tlskey ~/bin/data/server.key
 ```
