@@ -65,10 +65,13 @@ func (u *UDPLogger) writeToLog(data []byte) {
 	if len(trimmed) == 0 {
 		return
 	}
-	// Log to file via logary
-	u.Log.Debugf("%s", trimmed)
-	// Also print to stdout for immediate feedback
-	// fmt.Printf("[LOG] %s\n", string(trimmed))
+	if trimmed[0] == '{' && trimmed[len(trimmed)-1] == '}' {
+		u.Log.DebugJSON(trimmed)
+		return
+	}
+	// fmt.Println("Received log:", string(trimmed))
+	u.Log.Debug(string(trimmed))
+
 }
 
 func (u *UDPLogger) receiveDataOverUDP() {

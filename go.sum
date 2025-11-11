@@ -19,6 +19,14 @@ github.com/rexlx/logary v0.0.0-20251104211227-8165fa3bce4b h1:/gD3T62b1fOQZ8J3pz
 github.com/rexlx/logary v0.0.0-20251104211227-8165fa3bce4b/go.mod h1:BOVAd46u2K6rl4BzKWTAFgYTaL0AGHS3pzUy8J1zH+8=
 github.com/rexlx/logary v0.0.0-20251104211725-cb6e90014947 h1:5JetLwOlZuhXHRG6w7o9hBQ1QxWVgPEo7mP13ddaw6s=
 github.com/rexlx/logary v0.0.0-20251104211725-cb6e90014947/go.mod h1:BOVAd46u2K6rl4BzKWTAFgYTaL0AGHS3pzUy8J1zH+8=
+github.com/rexlx/logary v0.0.0-20251111165817-6824964c82db h1:WZHiN51kZaqxh/SyCxFq3nKeJVenYWkDqaXdlg+ghAY=
+github.com/rexlx/logary v0.0.0-20251111165817-6824964c82db/go.mod h1:BOVAd46u2K6rl4BzKWTAFgYTaL0AGHS3pzUy8J1zH+8=
+github.com/rexlx/logary v0.0.0-20251111190546-a025ff4dd1c2 h1:6a16VRj+XDAGNXvJlIoGM0b0ValqZGtJ7+5RJuDnLcY=
+github.com/rexlx/logary v0.0.0-20251111190546-a025ff4dd1c2/go.mod h1:BOVAd46u2K6rl4BzKWTAFgYTaL0AGHS3pzUy8J1zH+8=
+github.com/rexlx/logary v0.0.0-20251111202639-dd3a3ca898ee h1:TrxcNdF1UIT9jv5alDmJPTbJi444tdC+Dy+XHaJ4Nek=
+github.com/rexlx/logary v0.0.0-20251111202639-dd3a3ca898ee/go.mod h1:BOVAd46u2K6rl4BzKWTAFgYTaL0AGHS3pzUy8J1zH+8=
+github.com/rexlx/logary v0.0.0-20251111224910-3c6588435afc h1:a2ZKwj+nezIdyTB8uMdMSUXIBXo7tql7/asdl2CnrUs=
+github.com/rexlx/logary v0.0.0-20251111224910-3c6588435afc/go.mod h1:BOVAd46u2K6rl4BzKWTAFgYTaL0AGHS3pzUy8J1zH+8=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
 github.com/stretchr/testify v1.6.1/go.mod h1:6Fq8oRcR53rry900zMqJjRRixrwX3KX962/h/Wwjteg=
 go.uber.org/mock v0.3.0 h1:3mUxI1No2/60yUYax92Pt8eNOEecx2D3lcXZh2NEZJo=
