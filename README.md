@@ -1,5 +1,5 @@
 # rider
-udp / quic logging server. see tls_gen.sh for creating development certs.
+udp / quic logging server. see tls_gen.sh for creating development certs. there is limited support for receiving syslog messages (udp only, no quic)
 
  ```bash
 Usage of ./rider:
