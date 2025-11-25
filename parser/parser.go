@@ -1,9 +1,11 @@
 package parser
 
 import (
+	"net"
 	"regexp"
-	"strconv"
 	"strings"
+
+	"golang.org/x/net/publicsuffix"
 )
 
 type Contextualizer struct {
@@ -13,10 +15,9 @@ type Contextualizer struct {
 }
 
 type PrivateChecks struct {
-	Ipv4          bool
-	Ipv6          bool
-	Domain        []string // List of domains to ignore (e.g. "google.com")
-	PrivateEmails []string // List of email domains to ignore
+	IgnorePrivateIPs bool
+	IgnoredDomains   map[string]struct{}
+	IgnoredEmails    map[string]struct{}
 }
 
 type Match struct {
@@ -24,20 +25,33 @@ type Match struct {
 	Type  string
 }
 
-func NewContextualizer(checks *PrivateChecks) *Contextualizer {
+func NewContextualizer(ignoreIPs bool, ignoreDomains []string, ignoreEmails []string) *Contextualizer {
+	domainMap := make(map[string]struct{}, len(ignoreDomains))
+	for _, d := range ignoreDomains {
+		domainMap[strings.ToLower(d)] = struct{}{}
+	}
+
+	emailMap := make(map[string]struct{}, len(ignoreEmails))
+	for _, e := range ignoreEmails {
+		emailMap[strings.ToLower(e)] = struct{}{}
+	}
+
 	return &Contextualizer{
-		Checks: checks,
-		ID:     "contextualizer",
+		ID: "contextualizer",
+		Checks: &PrivateChecks{
+			IgnorePrivateIPs: ignoreIPs,
+			IgnoredDomains:   domainMap,
+			IgnoredEmails:    emailMap,
+		},
 		Expressions: map[string]*regexp.Regexp{
-			"md5":    regexp.MustCompile(`([a-fA-F\d]{32})`),
-			"sha1":   regexp.MustCompile(`([a-fA-F\d]{40})`),
-			"sha256": regexp.MustCompile(`([a-fA-F\d]{64})`),
-			"sha512": regexp.MustCompile(`([a-fA-F\d]{128})`),
-			"ipv4":   regexp.MustCompile(`(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})`),
-			"ipv6":   regexp.MustCompile(`([a-fA-F\d]{4}(:[a-fA-F\d]{4}){7})`),
-			"email":  regexp.MustCompile(`([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})`),
-			"url":    regexp.MustCompile(`((https?|ftp):\/\/[^\s/$.?#].[^\s]*)`),
-			// Kept to {2,3} to avoid false positives from long file extensions
+			"md5":      regexp.MustCompile(`([a-fA-F\d]{32})`),
+			"sha1":     regexp.MustCompile(`([a-fA-F\d]{40})`),
+			"sha256":   regexp.MustCompile(`([a-fA-F\d]{64})`),
+			"sha512":   regexp.MustCompile(`([a-fA-F\d]{128})`),
+			"ipv4":     regexp.MustCompile(`(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})`),
+			"ipv6":     regexp.MustCompile(`([a-fA-F\d]{4}(:[a-fA-F\d]{4}){7})`),
+			"email":    regexp.MustCompile(`([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})`),
+			"url":      regexp.MustCompile(`((https?|ftp):\/\/[^\s/$.?#].[^\s]*)`),
 			"domain":   regexp.MustCompile(`([a-zA-Z0-9.-]+\.[a-zA-Z]{2,3})`),
 			"filepath": regexp.MustCompile(`([a-zA-Z0-9.-]+\/[a-zA-Z0-9.-]+)`),
 			"filename": regexp.MustCompile(`^[\w\-. ]+\.[a-zA-Z]{2,4}$`),
@@ -48,97 +62,94 @@ func NewContextualizer(checks *PrivateChecks) *Contextualizer {
 func (c *Contextualizer) GetMatches(text string, kind string, regex *regexp.Regexp) []Match {
 	matches := regex.FindAllString(text, -1)
 	var results []Match
+
 	for _, match := range matches {
-		// Check for Private IPv4
-		if c.Checks.Ipv4 && isPrivateIP4(match) {
-			continue
-		}
+		// Normalize to lowercase for consistent checking/sending
+		cleanMatch := strings.ToLower(match)
 
-		// Check for Private Emails (Ignored Domains)
-		if kind == "email" && len(c.Checks.PrivateEmails) > 0 {
-			if isIgnoredEmail(match, c.Checks.PrivateEmails) {
+		// 1. Check IP Privacy
+		if kind == "ipv4" && c.Checks.IgnorePrivateIPs {
+			if isPrivateIP(match) {
 				continue
 			}
 		}
 
+		// 2. Check Ignore Lists (Emails)
+		if kind == "email" {
+			if _, exists := c.Checks.IgnoredEmails[cleanMatch]; exists {
+				continue
+			}
+		}
+
+		// 3. Check Ignore Lists (Domains)
 		if kind == "domain" {
-			baseUrl := extractSecondLevelDomain(match)
-
-			// Check if the base domain is in the ignore list
-			if len(c.Checks.Domain) > 0 && isIgnoredDomain(baseUrl, c.Checks.Domain) {
+			if c.isDomainIgnored(cleanMatch) {
 				continue
 			}
 
-			if baseUrl != "" {
-				results = append(results, Match{Value: baseUrl, Type: "base_domain"})
+			// Extract Base Domain
+			baseDomain, err := extractSecondLevelDomain(cleanMatch)
+			if err == nil && baseDomain != "" {
+				// LOGIC FIX: Deduplication
+				// Only add the base_domain if it is DIFFERENT from the match.
+				// Example: "maps.google.com" -> Adds "google.com" (Base)
+				// Example: "google.com"      -> Skips Base (it's the same as the match)
+				if baseDomain != cleanMatch {
+					if !c.isDomainIgnored(baseDomain) {
+						results = append(results, Match{Value: baseDomain, Type: "base_domain"})
+					}
+				}
 			}
 		}
-		results = append(results, Match{Value: match, Type: kind})
+
+		// Final Append
+		// We use 'cleanMatch' for domains/emails to ensure we don't send
+		// "Google.com" and "google.com" as two separate items to the API.
+		finalValue := match
+		if kind == "domain" || kind == "email" {
+			finalValue = cleanMatch
+		}
+
+		// Safety check to ensure we never send empty strings
+		if finalValue != "" {
+			results = append(results, Match{Value: finalValue, Type: kind})
+		}
 	}
 	return results
 }
 
-func extractSecondLevelDomain(domain string) string {
-	parts := strings.Split(domain, ".")
-	if len(parts) < 2 {
-		return ""
-	}
-
-	// Specific handling for .co.uk (and other 2-part TLDs if added later)
-	// If we have at least 3 parts and the last two are "co" and "uk"
-	if len(parts) >= 3 {
-		tld := parts[len(parts)-1]
-		sld := parts[len(parts)-2]
-		if tld == "uk" && sld == "co" {
-			return parts[len(parts)-3] + "." + sld + "." + tld
-		}
-	}
-
-	return parts[len(parts)-2] + "." + parts[len(parts)-1]
-}
-
-func isPrivateIP4(ip string) bool {
-	parts := strings.Split(ip, ".")
-	if len(parts) != 4 {
-		return false
-	}
-	first, _ := strconv.Atoi(parts[0])
-	second, _ := strconv.Atoi(parts[1])
-	if first == 10 {
-		return true
-	}
-	if first == 172 && second >= 16 && second <= 31 {
-		return true
-	}
-	if first == 192 && second == 168 {
-		return true
-	}
-	return false
-}
-
-// Helper function to check if an email belongs to a private/ignored domain
-func isIgnoredEmail(email string, ignoredDomains []string) bool {
-	parts := strings.Split(email, "@")
-	if len(parts) != 2 {
-		return false
-	}
-	domain := strings.ToLower(parts[1])
-
-	for _, ignored := range ignoredDomains {
-		if strings.ToLower(ignored) == domain {
+func (c *Contextualizer) isDomainIgnored(domain string) bool {
+	current := domain
+	for {
+		// Check if the current segment is in the map
+		if _, exists := c.Checks.IgnoredDomains[current]; exists {
 			return true
 		}
+
+		// Find the next dot to strip the subdomain
+		idx := strings.Index(current, ".")
+		if idx == -1 {
+			break // No more dots, we are done
+		}
+
+		// Move to the next level (e.g., from sub.google.com to google.com)
+		current = current[idx+1:]
 	}
 	return false
 }
 
-func isIgnoredDomain(domain string, ignoredDomains []string) bool {
-	domain = strings.ToLower(domain)
-
-	for _, ignored := range ignoredDomains {
-		if strings.ToLower(ignored) == domain {
-			return true
-		}
+func isPrivateIP(ipStr string) bool {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return false
 	}
-	return false
+	return ip.IsPrivate()
+}
+
+func extractSecondLevelDomain(domain string) (string, error) {
+	eTLDPlusOne, err := publicsuffix.EffectiveTLDPlusOne(domain)
+	if err != nil {
+		return "", err
+	}
+	return eTLDPlusOne, nil
 }

@@ -33,6 +33,8 @@ var (
 
 	// IOC Parsing Flags
 	iocParsing  = flag.Bool("ioc", false, "Enable real-time IOC parsing")
+	iocWorkers  = flag.Int("workers", 4, "Number of analysis workers")    // NEW FLAG
+	queueSize   = flag.Int("queuesize", 10000, "Size of analysis buffer") // NEW FLAG
 	apiURL      = flag.String("api-url", "http://localhost:8081/parse", "API Endpoint for IOCs")
 	apiUser     = flag.String("api-user", "test@aol.com", "API Username")
 	apiToken    = flag.String("api-token", "UmLPBz7zDXx1UreAJa+TupuBabP8T9wxr0yLTWiCnfQ=", "API Token")
@@ -51,14 +53,14 @@ var (
 	historyMutex   sync.RWMutex
 )
 
-// Logger specifically for confirmed hits
 var hitsLogger *logary.Logger
 
 type UDPLogger struct {
-	Addr      string
-	Log       *logary.Logger
-	Parser    *parser.Contextualizer
-	ParseIOCs bool
+	Addr          string
+	Log           *logary.Logger
+	Parser        *parser.Contextualizer
+	ParseIOCs     bool
+	AnalysisQueue chan string // Channel to pass logs to workers
 }
 
 // Payload structure for the API request
@@ -86,7 +88,7 @@ type SummarizedEvent struct {
 
 func main() {
 	flag.Parse()
-
+	ignoreList := []string{"nullferatu.com"}
 	jsonLogger, err := logary.NewLogger(logary.Config{
 		Filename:   *logFile,
 		Structured: *structured,
@@ -99,14 +101,17 @@ func main() {
 	}
 
 	var ctx *parser.Contextualizer
-	if *iocParsing {
-		// Initialize parser with default private checks
-		ctx = parser.NewContextualizer(&parser.PrivateChecks{})
+	var analysisQueue chan string
 
-		// Initialize Hits Logger
+	if *iocParsing {
+		ctx = parser.NewContextualizer(true, ignoreList, ignoreList)
+
+		// Initialize the Buffered Channel
+		analysisQueue = make(chan string, *queueSize)
+
 		hitsLogger, err = logary.NewLogger(logary.Config{
 			Filename:   *hitsLogFile,
-			Structured: true, // Always structured for hits
+			Structured: true,
 			Level:      logary.InfoLevel,
 			MaxSizeMB:  *logSize,
 			MaxBackups: *logBackups,
@@ -115,13 +120,17 @@ func main() {
 			panic(fmt.Errorf("failed to create hits logger: %v", err))
 		}
 
-		fmt.Printf("IOC Parsing enabled. Sending batches to %s every 5s\n", *apiURL)
+		fmt.Printf("IOC Parsing enabled. Spawning %d workers. Sending batches to %s every 5s\n", *iocWorkers, *apiURL)
 
-		// Start Ticker to flush and send IOCs periodically
+		// 1. Start the Worker Pool
+		for i := 0; i < *iocWorkers; i++ {
+			go analysisWorker(i, analysisQueue, ctx)
+		}
+
+		// 2. Start Ticker to flush and send IOCs
 		go func() {
 			ticker := time.NewTicker(5 * time.Second)
 			defer ticker.Stop()
-
 			for range ticker.C {
 				flushAndSendIOCs()
 			}
@@ -129,10 +138,11 @@ func main() {
 	}
 
 	udpLogger := &UDPLogger{
-		Addr:      *addr,
-		Log:       jsonLogger,
-		Parser:    ctx,
-		ParseIOCs: *iocParsing,
+		Addr:          *addr,
+		Log:           jsonLogger,
+		Parser:        ctx,
+		ParseIOCs:     *iocParsing,
+		AnalysisQueue: analysisQueue,
 	}
 
 	if *experimental {
@@ -144,8 +154,25 @@ func main() {
 	}
 }
 
+// NEW: The Worker Function
+func analysisWorker(id int, queue <-chan string, p *parser.Contextualizer) {
+	// Reusable buffer or local variables can go here to reduce GC pressure
+	for logLine := range queue {
+		for kind, regex := range p.Expressions {
+			// This is CPU intensive, but now it runs on a different core
+			matches := p.GetMatches(logLine, kind, regex)
+			if len(matches) > 0 {
+				iocMutex.Lock()
+				for _, m := range matches {
+					iocMatches[m.Value] = m.Type
+				}
+				iocMutex.Unlock()
+			}
+		}
+	}
+}
+
 func flushAndSendIOCs() {
-	// 1. SWAP: Lock, grab current matches, replace with empty map, Unlock.
 	iocMutex.Lock()
 	if len(iocMatches) == 0 {
 		iocMutex.Unlock()
@@ -155,7 +182,6 @@ func flushAndSendIOCs() {
 	iocMatches = make(map[string]string)
 	iocMutex.Unlock()
 
-	// 2. FILTER: Check against history to avoid resending
 	var matchesToSend []string
 
 	historyMutex.Lock()
@@ -167,17 +193,13 @@ func flushAndSendIOCs() {
 	}
 	historyMutex.Unlock()
 
-	// If everything in this batch has been sent before, skip
 	if len(matchesToSend) == 0 {
 		return
 	}
 
-	// 3. PREPARE: Join keys into a space-separated blob
 	blob := strings.Join(matchesToSend, " ")
-
 	fmt.Printf("[IOC Sender] Sending NEW batch of %d matches...\n", len(matchesToSend))
 
-	// 4. SEND: Construct request
 	payload := APIPayload{
 		Username: *apiUser,
 		Blob:     blob,
@@ -195,7 +217,6 @@ func flushAndSendIOCs() {
 		return
 	}
 
-	// Set Headers
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", fmt.Sprintf("%s:%s", *apiUser, *apiToken))
 
@@ -208,7 +229,6 @@ func flushAndSendIOCs() {
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		// 5. PROCESS RESPONSE
 		var events []SummarizedEvent
 		if err := json.NewDecoder(resp.Body).Decode(&events); err != nil {
 			log.Printf("[IOC Sender] Error decoding response: %v", err)
@@ -218,18 +238,13 @@ func flushAndSendIOCs() {
 		if len(events) > 0 {
 			matchCount := 0
 			for _, event := range events {
-				// Only process if it is a confirmed match
 				if event.Matched {
 					matchCount++
 					fmt.Printf("   [MATCH] %s (%s) - ID: %s | Info: %s\n", event.Value, event.Type, event.ID, event.Info)
-
-					// Log matched event to the dedicated hits file
 					if hitsLogger != nil {
 						data, err := json.Marshal(event)
 						if err == nil {
 							hitsLogger.InfoJSON(data)
-						} else {
-							log.Printf("[IOC Sender] Error marshalling event for log: %v", err)
 						}
 					}
 				}
@@ -237,10 +252,7 @@ func flushAndSendIOCs() {
 			if matchCount > 0 {
 				fmt.Printf("[IOC Sender] Logged %d confirmed hits to %s\n", matchCount, *hitsLogFile)
 			}
-		} else {
-			fmt.Println("[IOC Sender] No matches found in MISP.")
 		}
-
 	} else {
 		log.Printf("[IOC Sender] API Error: %s", resp.Status)
 	}
@@ -254,32 +266,31 @@ func (u *UDPLogger) writeToLog(data []byte) {
 
 	logLine := string(trimmed)
 
-	// FILTER: Safely ignore successful router drops
 	if strings.Contains(logLine, "action=DROP") && strings.Contains(logLine, "reason=POLICY-INPUT-GEN-DISCARD") {
 		return
 	}
 
-	// PARSE: Extract IOCs if enabled
-	if u.ParseIOCs && u.Parser != nil {
-		for kind, regex := range u.Parser.Expressions {
-			matches := u.Parser.GetMatches(logLine, kind, regex)
-			if len(matches) > 0 {
-				iocMutex.Lock()
-				for _, m := range matches {
-					iocMatches[m.Value] = m.Type
-				}
-				iocMutex.Unlock()
-			}
-		}
-	}
-
+	// 1. Write to Disk (Priority)
 	if trimmed[0] == '{' && trimmed[len(trimmed)-1] == '}' {
 		u.Log.DebugJSON(trimmed)
-		return
+	} else {
+		u.Log.Debug(logLine)
 	}
-	u.Log.Debug(logLine)
+
+	// 2. Send to Analysis (Non-blocking)
+	if u.ParseIOCs && u.AnalysisQueue != nil {
+		select {
+		case u.AnalysisQueue <- logLine:
+			// Successfully queued for workers
+		default:
+			// Queue is full!
+			// We skip analysis for this log to preserve ingestion speed.
+			// Optional: Increment a "dropped_analysis" counter here.
+		}
+	}
 }
 
+// ... (receiveDataOverUDP and receiveDataOverQUIC remain the same)
 func (u *UDPLogger) receiveDataOverUDP() {
 	serverAddr, err := net.ResolveUDPAddr("udp", u.Addr)
 	if err != nil {
@@ -291,14 +302,20 @@ func (u *UDPLogger) receiveDataOverUDP() {
 	}
 	defer server.Close()
 
+	// This is the "Shared" buffer
 	buf := make([]byte, *size)
+
 	for {
 		n, _, err := server.ReadFromUDP(buf)
 		if err != nil {
 			log.Printf("UDP Read Error: %v", err)
 			continue
 		}
-		u.writeToLog(buf[:n])
+		payload := make([]byte, n)
+		copy(payload, buf[:n])
+
+		// Pass the COPY, not the original 'buf'
+		u.writeToLog(payload)
 	}
 }
 
@@ -348,11 +365,17 @@ func (u *UDPLogger) readFromStream(stream quic.Stream) {
 	scanner := bufio.NewScanner(stream)
 
 	for scanner.Scan() {
-		data := scanner.Bytes()
-		if bytes.Equal(bytes.TrimSpace(data), []byte("|beat|")) {
+		// scanner.Bytes() is volatile!
+		raw := scanner.Bytes()
+
+		if bytes.Equal(bytes.TrimSpace(raw), []byte("|beat|")) {
 			continue
 		}
-		u.writeToLog(data)
+
+		payload := make([]byte, len(raw))
+		copy(payload, raw)
+
+		u.writeToLog(payload)
 	}
 
 	if err := scanner.Err(); err != nil {
