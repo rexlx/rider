@@ -126,7 +126,6 @@ func (c *Contextualizer) isDomainIgnored(domain string) bool {
 			return true
 		}
 
-		// Find the next dot to strip the subdomain
 		idx := strings.Index(current, ".")
 		if idx == -1 {
 			break // No more dots, we are done
