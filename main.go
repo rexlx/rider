@@ -184,8 +184,24 @@ func flushAndSendIOCs() {
 
 	var matchesToSend []string
 
+	ignoredSuffixes := []string{".sco", ".ser", ".uda", ".log", ".cup", ".con", ".d"}
+
 	historyMutex.Lock()
 	for val := range currentBatch {
+		// 1. Check if the value matches any of the ignored suffixes
+		shouldIgnore := false
+		for _, suffix := range ignoredSuffixes {
+			if strings.HasSuffix(val, suffix) {
+				shouldIgnore = true
+				break
+			}
+		}
+
+		if shouldIgnore {
+			continue
+		}
+
+		// 2. Proceed with history check if valid
 		if !historyMatches[val] {
 			matchesToSend = append(matchesToSend, val)
 			historyMatches[val] = true
