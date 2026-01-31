@@ -15,6 +15,9 @@ import (
 	"sync"
 	"time"
 
+	lru "github.com/hashicorp/golang-lru/v2"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/quic-go/quic-go"
 	"github.com/rexlx/logary"
 	"rxlx.us/rider/parser"
@@ -31,26 +34,54 @@ var (
 	serverCert   = flag.String("tlscert", "server.crt", "Path to TLS certificate file for QUIC")
 	serverKey    = flag.String("tlskey", "server.key", "Path to TLS key file for QUIC")
 
-	// IOC Parsing Flags
 	iocParsing  = flag.Bool("ioc", false, "Enable real-time IOC parsing")
-	iocWorkers  = flag.Int("workers", 4, "Number of analysis workers")    // NEW FLAG
-	queueSize   = flag.Int("queuesize", 10000, "Size of analysis buffer") // NEW FLAG
+	iocWorkers  = flag.Int("workers", 4, "Number of analysis workers")
+	queueSize   = flag.Int("queuesize", 10000, "Size of analysis buffer")
 	apiURL      = flag.String("api-url", "http://localhost:8081/parse", "API Endpoint for IOCs")
 	apiUser     = flag.String("api-user", "test@aol.com", "API Username")
 	apiToken    = flag.String("api-token", "UmLPBz7zDXx1UreAJa+TupuBabP8T9wxr0yLTWiCnfQ=", "API Token")
 	hitsLogFile = flag.String("hitslogfile", "hits.json", "Hits log file name")
+	promAddr    = flag.String("prom-addr", ":9100", "Address to expose Prometheus metrics")
 )
 
-// Thread-safe storage for IOC matches (Current Batch)
 var (
-	iocMatches = make(map[string]string) // Value -> Type
+	iocMatches = make(map[string]string)
 	iocMutex   sync.RWMutex
 )
 
-// Thread-safe storage for History (Already sent)
 var (
-	historyMatches = make(map[string]bool)
-	historyMutex   sync.RWMutex
+	historyCache *lru.Cache[string, bool]
+)
+
+var (
+	udpPacketsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "rider_udp_packets_total",
+		Help: "Total number of UDP packets received",
+	})
+	udpBytesTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "rider_udp_bytes_total",
+		Help: "Total number of UDP bytes received",
+	})
+	quicSessionsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "rider_quic_sessions_total",
+		Help: "Total number of QUIC sessions accepted",
+	})
+	quicStreamsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "rider_quic_streams_total",
+		Help: "Total number of QUIC streams accepted",
+	})
+	logsProcessedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "rider_logs_processed_total",
+		Help: "Total number of log lines written/processed",
+	})
+	iocConfirmedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "rider_ioc_confirmed_total",
+		Help: "Total number of confirmed IOC hits from API",
+	})
+	analysisDroppedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "rider_analysis_dropped_total",
+		Help: "Total number of logs dropped from analysis queue due to buffer full",
+	})
 )
 
 var hitsLogger *logary.Logger
@@ -60,16 +91,14 @@ type UDPLogger struct {
 	Log           *logary.Logger
 	Parser        *parser.Contextualizer
 	ParseIOCs     bool
-	AnalysisQueue chan string // Channel to pass logs to workers
+	AnalysisQueue chan string
 }
 
-// Payload structure for the API request
 type APIPayload struct {
 	Username string `json:"username"`
 	Blob     string `json:"blob"`
 }
 
-// Response structure from the API
 type SummarizedEvent struct {
 	Timestamp     time.Time `json:"timestamp"`
 	Matched       bool      `json:"matched"`
@@ -86,8 +115,23 @@ type SummarizedEvent struct {
 	Type          string    `json:"type"`
 }
 
+func init() {
+	prometheus.MustRegister(udpPacketsTotal)
+	prometheus.MustRegister(udpBytesTotal)
+	prometheus.MustRegister(quicSessionsTotal)
+	prometheus.MustRegister(quicStreamsTotal)
+	prometheus.MustRegister(logsProcessedTotal)
+	prometheus.MustRegister(iocConfirmedTotal)
+	prometheus.MustRegister(analysisDroppedTotal)
+}
+
 func main() {
 	flag.Parse()
+	var err error
+	historyCache, err = lru.New[string, bool](100000)
+	if err != nil {
+		panic(fmt.Errorf("failed to initialize history cache: %v", err))
+	}
 	ignoreList := []string{"nullferatu.com"}
 	jsonLogger, err := logary.NewLogger(logary.Config{
 		Filename:   *logFile,
@@ -100,13 +144,19 @@ func main() {
 		panic(err)
 	}
 
+	go func() {
+		http.Handle("/metrics", promhttp.Handler())
+		log.Printf("Prometheus metrics exposed on %s/metrics\n", *promAddr)
+		if err := http.ListenAndServe(*promAddr, nil); err != nil {
+			log.Printf("Error starting Prometheus server: %v", err)
+		}
+	}()
+
 	var ctx *parser.Contextualizer
 	var analysisQueue chan string
 
 	if *iocParsing {
 		ctx = parser.NewContextualizer(true, ignoreList, ignoreList)
-
-		// Initialize the Buffered Channel
 		analysisQueue = make(chan string, *queueSize)
 
 		hitsLogger, err = logary.NewLogger(logary.Config{
@@ -122,12 +172,10 @@ func main() {
 
 		fmt.Printf("IOC Parsing enabled. Spawning %d workers. Sending batches to %s every 5s\n", *iocWorkers, *apiURL)
 
-		// 1. Start the Worker Pool
 		for i := 0; i < *iocWorkers; i++ {
 			go analysisWorker(i, analysisQueue, ctx)
 		}
 
-		// 2. Start Ticker to flush and send IOCs
 		go func() {
 			ticker := time.NewTicker(5 * time.Second)
 			defer ticker.Stop()
@@ -154,12 +202,9 @@ func main() {
 	}
 }
 
-// NEW: The Worker Function
 func analysisWorker(id int, queue <-chan string, p *parser.Contextualizer) {
-	// Reusable buffer or local variables can go here to reduce GC pressure
 	for logLine := range queue {
 		for kind, regex := range p.Expressions {
-			// This is CPU intensive, but now it runs on a different core
 			matches := p.GetMatches(logLine, kind, regex)
 			if len(matches) > 0 {
 				iocMutex.Lock()
@@ -184,30 +229,12 @@ func flushAndSendIOCs() {
 
 	var matchesToSend []string
 
-	ignoredSuffixes := []string{".sco", ".ser", ".uda", ".log", ".cup", ".con", ".d"}
-
-	historyMutex.Lock()
 	for val := range currentBatch {
-		// 1. Check if the value matches any of the ignored suffixes
-		shouldIgnore := false
-		for _, suffix := range ignoredSuffixes {
-			if strings.HasSuffix(val, suffix) {
-				shouldIgnore = true
-				break
-			}
-		}
-
-		if shouldIgnore {
-			continue
-		}
-
-		// 2. Proceed with history check if valid
-		if !historyMatches[val] {
+		if !historyCache.Contains(val) {
 			matchesToSend = append(matchesToSend, val)
-			historyMatches[val] = true
+			historyCache.Add(val, true)
 		}
 	}
-	historyMutex.Unlock()
 
 	if len(matchesToSend) == 0 {
 		return
@@ -256,6 +283,7 @@ func flushAndSendIOCs() {
 			for _, event := range events {
 				if event.Matched {
 					matchCount++
+					iocConfirmedTotal.Inc()
 					fmt.Printf("   [MATCH] %s (%s) - ID: %s | Info: %s\n", event.Value, event.Type, event.ID, event.Info)
 					if hitsLogger != nil {
 						data, err := json.Marshal(event)
@@ -286,27 +314,22 @@ func (u *UDPLogger) writeToLog(data []byte) {
 		return
 	}
 
-	// 1. Write to Disk (Priority)
 	if trimmed[0] == '{' && trimmed[len(trimmed)-1] == '}' {
 		u.Log.DebugJSON(trimmed)
 	} else {
 		u.Log.Debug(logLine)
 	}
 
-	// 2. Send to Analysis (Non-blocking)
 	if u.ParseIOCs && u.AnalysisQueue != nil {
 		select {
 		case u.AnalysisQueue <- logLine:
-			// Successfully queued for workers
 		default:
-			// Queue is full!
-			// We skip analysis for this log to preserve ingestion speed.
-			// Optional: Increment a "dropped_analysis" counter here.
+			analysisDroppedTotal.Inc()
 		}
 	}
+	logsProcessedTotal.Inc()
 }
 
-// ... (receiveDataOverUDP and receiveDataOverQUIC remain the same)
 func (u *UDPLogger) receiveDataOverUDP() {
 	serverAddr, err := net.ResolveUDPAddr("udp", u.Addr)
 	if err != nil {
@@ -318,7 +341,6 @@ func (u *UDPLogger) receiveDataOverUDP() {
 	}
 	defer server.Close()
 
-	// This is the "Shared" buffer
 	buf := make([]byte, *size)
 
 	for {
@@ -327,10 +349,11 @@ func (u *UDPLogger) receiveDataOverUDP() {
 			log.Printf("UDP Read Error: %v", err)
 			continue
 		}
+		udpPacketsTotal.Inc()
+		udpBytesTotal.Add(float64(n))
 		payload := make([]byte, n)
 		copy(payload, buf[:n])
 
-		// Pass the COPY, not the original 'buf'
 		u.writeToLog(payload)
 	}
 }
@@ -361,6 +384,7 @@ func (u *UDPLogger) receiveDataOverQUIC(tlsCert, tlsKey string) {
 			continue
 		}
 		fmt.Println("Accepted new QUIC connection")
+		quicSessionsTotal.Inc()
 		go u.handleQUICSession(sess)
 	}
 }
@@ -372,6 +396,7 @@ func (u *UDPLogger) handleQUICSession(sess quic.Connection) {
 			return
 		}
 		fmt.Println("Accepted new stream")
+		quicStreamsTotal.Inc()
 		go u.readFromStream(stream)
 	}
 }
@@ -381,7 +406,6 @@ func (u *UDPLogger) readFromStream(stream quic.Stream) {
 	scanner := bufio.NewScanner(stream)
 
 	for scanner.Scan() {
-		// scanner.Bytes() is volatile!
 		raw := scanner.Bytes()
 
 		if bytes.Equal(bytes.TrimSpace(raw), []byte("|beat|")) {
