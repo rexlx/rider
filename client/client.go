@@ -22,7 +22,7 @@ type SecretManager struct {
 	Destination net.Addr
 }
 
-func dialQUIC(url string, sm *SecretManager) quic.Stream {
+func dialQUIC(url string, sm *SecretManager) *quic.Stream {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second) // 3s handshake timeout
 	defer cancel()
 	// fmt.Println("Dialing QUIC", url, sm.QC, sm.TC)

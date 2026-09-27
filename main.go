@@ -389,7 +389,7 @@ func (u *UDPLogger) receiveDataOverQUIC(tlsCert, tlsKey string) {
 	}
 }
 
-func (u *UDPLogger) handleQUICSession(sess quic.Connection) {
+func (u *UDPLogger) handleQUICSession(sess *quic.Conn) {
 	for {
 		stream, err := sess.AcceptStream(context.Background())
 		if err != nil {
@@ -401,7 +401,7 @@ func (u *UDPLogger) handleQUICSession(sess quic.Connection) {
 	}
 }
 
-func (u *UDPLogger) readFromStream(stream quic.Stream) {
+func (u *UDPLogger) readFromStream(stream *quic.Stream) {
 	defer stream.Close()
 	scanner := bufio.NewScanner(stream)
 
